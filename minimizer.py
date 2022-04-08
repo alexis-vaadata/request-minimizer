@@ -5,7 +5,7 @@ from java.lang import Thread as JavaThread
 from javax.swing import JMenuItem
 import array
 
-import xmltodict
+# import xmltodict
 
 from threading import Thread
 from functools import partial
@@ -37,21 +37,21 @@ class Minimizer(object):
 
     def compare(self, etalon, response, etalon_invariant):
         invariant = set(self._helpers.analyzeResponseVariations([etalon, response]).getInvariantAttributes())
-        print("Invariant", invariant)
-        print("diff", set(etalon_invariant) - set(invariant))
+        # print("Invariant", invariant)
+        # print("diff", set(etalon_invariant) - set(invariant))
         return len(set(etalon_invariant) - set(invariant)) == 0
 
     def minimize(self, replace, event):
         Thread(target=self._minimize, args=(replace,)).start()
 
-    def _fix_cookies(self, current_req):
+    def _fix_cookies(self, current_req, headers_minimized):
         """ Workaround for a bug in extender,
         see https://support.portswigger.net/customer/portal/questions/17091600
         """
         cur_request_info = self._helpers.analyzeRequest(current_req)
         new_headers = []
         rebuild = False
-        for header in cur_request_info.getHeaders():
+        for header in headers_minimized:
             if header.strip().lower() != 'cookie:':
                 new_headers.append(header)
             else:
@@ -59,6 +59,22 @@ class Minimizer(object):
         if rebuild:
             return self._helpers.buildHttpMessage(new_headers, current_req[cur_request_info.getBodyOffset():])
         return current_req
+
+    def _fix_headers(self, request_info, etalon, invariant, current_req):
+        headers_list = request_info.getHeaders()
+        new_header_list = []
+        message_body = etalon[request_info.getBodyOffset():]
+        for header in headers_list:
+            checked_list = list(headers_list)[:]
+            checked_list.remove(header)
+            new_req = self._helpers.buildHttpMessage(checked_list, message_body)
+            resp = self._cb.makeHttpRequest(self._httpServ, new_req).getResponse()
+            if self.compare(etalon, resp, invariant):
+                continue
+            else:
+                new_header_list.append(header)
+        return new_header_list
+
 
 
     def _minimize(self, replace):
@@ -68,10 +84,9 @@ class Minimizer(object):
             request_info = self._helpers.analyzeRequest(self._request)
             current_req = self._request.getRequest()
             etalon = self._cb.makeHttpRequest(self._httpServ, current_req).getResponse()
-            etalon2 = self._cb.makeHttpRequest(self._httpServ, current_req).getResponse()
-            invariants = set(self._helpers.analyzeResponseVariations([etalon, etalon2]).getInvariantAttributes())
+            invariants = set(self._helpers.analyzeResponseVariations([etalon, etalon]).getInvariantAttributes())
             invariants -= IGNORED_INVARIANTS
-            print("Request invariants", invariants)
+            headers_minimized = self._fix_headers(request_info, etalon, invariants, current_req)
             for param in request_info.getParameters():
                 param_type = param.getType()
                 if param_type in [IParameter.PARAM_URL, IParameter.PARAM_BODY, IParameter.PARAM_COOKIE]:
@@ -79,8 +94,7 @@ class Minimizer(object):
                     req = self._helpers.removeParameter(current_req, param)
                     resp = self._cb.makeHttpRequest(self._httpServ, req).getResponse()
                     if self.compare(etalon, resp, invariants):
-                        print("excluded:", param.getType(), param.getName(), param.getValue())
-                        current_req = self._fix_cookies(req)
+                        current_req = self._fix_cookies(req, headers_minimized)
                 else:
                     if param_type == IParameter.PARAM_JSON:
                         seen_json = True
@@ -88,20 +102,22 @@ class Minimizer(object):
                         seen_xml = True
                     else:
                         print("Unsupported type:", param.getType())
+            print("Headers : ", headers_minimized)
             seen_json = (request_info.getContentType() == IRequestInfo.CONTENT_TYPE_JSON or seen_json)
             seen_xml = (request_info.getContentType() == IRequestInfo.CONTENT_TYPE_XML or seen_xml)
             if seen_json or seen_xml:
+                print("JSON Detected :)")
                 body_offset = request_info.getBodyOffset()
-                headers = self._request.getRequest()[:body_offset].tostring()
+                headers = '\r\n'.join(headers_minimized)
                 body = self._request.getRequest()[body_offset:].tostring()
                 if seen_json:
                     print('Minimizing json...')
                     dumpmethod = partial(json.dumps, indent=4)
                     loadmethod = json.loads
                 elif seen_xml:
-                    print('Minimizing XML...')
-                    dumpmethod = partial(xmltodict.unparse, pretty=True)
-                    loadmethod = xmltodict.parse
+                    print('Sorry, unable to install xmltodict :)')
+                    # dumpmethod = partial(xmltodict.unparse, pretty=True)
+                    # loadmethod = xmltodict.parse
                 # The minimization routine for both xml and json is the same,
                 # the only difference is with load and dump functions    
                 def check(body):
@@ -109,7 +125,7 @@ class Minimizer(object):
                         # XML with and no root node is invalid
                         return False
                     body = str(dumpmethod(body))
-                    req = fix_content_type(headers, body)
+                    req = fix_content_length(headers_minimized, body)
                     resp = self._cb.makeHttpRequest(self._httpServ, req).getResponse()
                     if self.compare(etalon, resp, invariants):
                         print("Not changed: " + body)
@@ -119,7 +135,9 @@ class Minimizer(object):
                         return False
                 body = loadmethod(body)
                 body = bf_search(body, check)
-                current_req = fix_content_type(headers, str(dumpmethod(body)))
+                current_req = fix_content_length(headers, str(dumpmethod(body)))
+            else:
+                current_req = '\r\n'.join(headers_minimized)
             if replace:
                 self._request.setRequest(current_req)
             else:
@@ -128,13 +146,13 @@ class Minimizer(object):
                         self._httpServ.getPort(),
                         self._httpServ.getProtocol() == 'https',
                         current_req,
-                        "minimized"
+                       headers_minimized[0]
                 )
         except:
-            print traceback.format_exc()
+            print(traceback.format_exc())
 
 def bf_search(body, check_func):
-    print('Starting to minimize', body)
+    # print('Starting to minimize', body)
     if isinstance(body, dict):
         to_test = body.items()
         assemble = lambda l : dict(l)
@@ -145,7 +163,7 @@ def bf_search(body, check_func):
     tested = []
     while len(to_test):
         current = to_test.pop()
-        print('Trying to eliminate', current)
+        # print('Trying to eliminate', current)
         if not check_func(assemble(to_test+tested)):
             tested.append(current)
     #2. Recurse into remainig sub_items
@@ -160,12 +178,13 @@ def bf_search(body, check_func):
         tested.append((key, value))
     return assemble(tested)
 
-def fix_content_type(headers, body):
-    headers = headers.split('\r\n')
-    for i in range(len(headers)):
-        if headers[i].lower().startswith('content-length'):
-            headers[i] = 'Content-Length: ' + str(len(body))
-    return array.array('b', '\r\n'.join(headers) + body)
+def fix_content_length(headers, body):
+    # headers = headers.split('\r\n')
+    # for i in range(len(headers)):
+    #     if headers[i].lower().startswith('content-length'):
+    #         headers[i] = 'Content-Length: ' + str(len(body))
+    print("Headers join : ", headers)
+    return array.array('b', '\r\n'.join(str(headers)) + body)
 
 class BurpExtender(IBurpExtender, IContextMenuFactory):
     def registerExtenderCallbacks(self, callbacks):
