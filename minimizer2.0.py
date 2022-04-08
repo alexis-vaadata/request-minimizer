@@ -1,4 +1,3 @@
-from calendar import c
 from burp import IBurpExtender, IContextMenuFactory, IContextMenuInvocation, IParameter, IRequestInfo
 from javax.swing import JMenuItem
 from functools import partial
@@ -26,8 +25,8 @@ class Miniminder(object):
         self._minimized_headers = []
         self._minimized_body = ""
         self._initial_invariants = set()
-        
         self._initial_parameters = []
+        self._request_to_send = ""
     
     def minimize(self, replace, event):
         Thread(target=self._minimize, args=(replace,)).start()
@@ -37,10 +36,10 @@ class Miniminder(object):
         return len(set(self._initial_invariants) - set(invariant)) == 0
 
     def minimize_headers(self):
+        self._minimized_headers = []
         self._minimized_headers.append(self._initial_headers[0])
         for header in self._initial_headers[1:]:
             if any(header.startswith(s) for s in Whitelist):
-                print("Header in List : ", header)
                 self._minimized_headers.append(header)
                 continue
             copy_headers = list(self._initial_headers)[:]
@@ -57,33 +56,18 @@ class Miniminder(object):
         self._current_request = self._request.getRequest()
         self._initial_http_request = self._cb.makeHttpRequest(self._httpServ, self._current_request).getResponse()
         self._request_info = self._helpers.analyzeRequest(self._request)
-        
         self._initial_body = list(self._current_request[self._request_info.getBodyOffset():])
         self._initial_headers = list(self._request_info.getHeaders())
         self._initial_invariants = set(self._helpers.analyzeResponseVariations([self._initial_http_request, self._initial_http_request]).getInvariantAttributes())
-        self._initial_invariants -= IGNORED_INVARIANTS
-        
-        # Params : Body + Cookies + JSON + Multipart + URL + XML + XML_ATTR 
-        # Params Types : 0=URL; 1=BODY; 2=COOKIE; 6=JSON; IParameter.PARAM_URL, IParameter.PARAM_BODY, IParameter.PARAM_COOKIE
+        self._initial_invariants -= IGNORED_INVARIANTS 
         self._initial_parameters = list(self._request_info.getParameters())
-        # param_type = param.getType()
-        #         if param_type in [IParameter.PARAM_URL, IParameter.PARAM_BODY, IParameter.PARAM_COOKIE]:
-        # print("Initial Parameters : ")
-        # for x in self._initial_parameters:
-        #     print(x.getName(), x.getType())
+        self._minimized_headers = list(self._initial_headers)[:]
+        self._minimized_body = list(self._initial_body)[:] 
+        
         return True
 
-    def display(self, new_tab, request):
-        if (new_tab == True):
-            self._cb.sendToRepeater(
-                self._httpServ.getHost(),
-                self._httpServ.getPort(),
-                self._httpServ.getProtocol() == 'https',
-                request,
-                "Minimizer 2.0"
-            )
-        else:
-            self._request.setRequest(request)
+    def display(self, request):
+        self._request.setRequest(request)
         return True
     
     def fix_content_type(self, headers, body):
@@ -134,11 +118,11 @@ class Miniminder(object):
     
     def minimize_body(self):
         try:
+            self._minimized_body = []
             for param in self._initial_parameters:
                 seen_xml = seen_json = False
                 param_type = param.getType()
                 if param_type in [IParameter.PARAM_URL, IParameter.PARAM_BODY, IParameter.PARAM_COOKIE]:
-                    print("Trying", param_type, param.getName(), param.getValue())
                     req = self._helpers.removeParameter(self._current_request, param)
                     resp = self._cb.makeHttpRequest(self._httpServ, req).getResponse()
                     if self.compare_requests(resp):
@@ -155,10 +139,8 @@ class Miniminder(object):
                 if seen_json or seen_xml:
                     body_offset = self._request_info.getBodyOffset()
                     headers = self._request.getRequest()[:body_offset].tostring()
-                    print("Checker : ", headers)
                     body = self._request.getRequest()[body_offset:].tostring()
                     if seen_json:
-                        print('Minimizing json...')
                         dumpmethod = partial(json.dumps, indent=4)
                         loadmethod = json.loads
                     elif seen_xml:
@@ -181,30 +163,31 @@ class Miniminder(object):
                     body = loadmethod(body)
                     body = self.bf_search(body, check)
                     self._minimized_body = str(dumpmethod(body))
-                    # current_req = '\r\n'.join(self._minimized_headers) + '\r\n' + str(dumpmethod(body))
-                    # self.display(False, current_req)
                     return True
                 else:
-                    print("Juste Header")
                     current_req = '\r\n'.join(self._minimized_headers)
                     return current_req
         except:
             print(traceback.format_exc())
         return True
 
-    def _minimize(self, new_tab):
+    def _minimize(self, choice):
         self.init_requests()
-        self.minimize_headers()
-        print("Minimized Headers : ", self._minimized_headers)
-
-        request = self.minimize_body()
-        print("Minimized Body : ", self._minimized_body)
-        arr = array.array('b', str(self._minimized_body))
-        print("ARRAY : ", arr)
-        request = self._helpers.buildHttpMessage(self._minimized_headers, arr)
-        # request = '\r\n'.join(self._minimized_headers) + '\r\n\r\n' + self._minimized_body
-        print("Final request : ", request)
-        self.display(new_tab, request)
+        if choice == 0:
+                self.minimize_headers()
+                self._request_to_send = self._helpers.buildHttpMessage(self._minimized_headers, self._minimized_body)
+        elif choice == 1:
+                self.minimize_body()
+                arr = array.array('b', str(self._minimized_body))
+                self._request_to_send = self._helpers.buildHttpMessage(self._minimized_headers, arr)
+        elif choice == 2:
+                self.minimize_headers()
+                self.minimize_body()
+                arr = array.array('b', str(self._minimized_body))
+                self._request_to_send = self._helpers.buildHttpMessage(self._minimized_headers, arr)
+        else:
+            print("Error :  Bad choice")
+        self.display(self._request_to_send)
         return True
 
 
@@ -218,15 +201,20 @@ class BurpExtender(IBurpExtender, IContextMenuFactory):
         if invocation.getInvocationContext() == IContextMenuInvocation.CONTEXT_MESSAGE_EDITOR_REQUEST:
             return [
                 JMenuItem(
-                    "Current Tab",
+                    "Minimize Headers",
                     actionPerformed=partial(
-                        Miniminder(self._callbacks, invocation.getSelectedMessages()).minimize, False
+                        Miniminder(self._callbacks, invocation.getSelectedMessages()).minimize, 0
                     )
                 ),
                 JMenuItem(
-                    "New Tab",
+                    "Minimize Body",
                     actionPerformed=partial(
-                        Miniminder(self._callbacks, invocation.getSelectedMessages()).minimize, True
+                        Miniminder(self._callbacks, invocation.getSelectedMessages()).minimize, 1
+                    )
+                ),JMenuItem(
+                    "Minimize All",
+                    actionPerformed=partial(
+                        Miniminder(self._callbacks, invocation.getSelectedMessages()).minimize, 2
                     )
                 ),
             ]
