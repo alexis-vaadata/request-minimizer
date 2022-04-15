@@ -8,11 +8,13 @@ import traceback
 
 IGNORED_INVARIANTS = set(['Report-To'])
 
-
 Whitelist = ['Host', 'Content-Type', 'Content-Length']
 
 class Miniminder(object):
     def __init__(self, callbacks, request):
+        """
+        Initialisation of class variables
+        """
         self._request = request[0]
         self._cb = callbacks
         self._helpers = callbacks.helpers
@@ -32,10 +34,16 @@ class Miniminder(object):
         Thread(target=self._minimize, args=(replace,)).start()
 
     def compare_requests(self, new_http_request):
+        """
+        Compare initial http request and another passed as a parameter
+        """
         invariant = set(self._helpers.analyzeResponseVariations([self._initial_http_request, new_http_request]).getInvariantAttributes())
         return len(set(self._initial_invariants) - set(invariant)) == 0
 
     def minimize_headers(self):
+        """
+        Returns the list of minimized headers.
+        """
         self._minimized_headers = []
         self._minimized_headers.append(self._initial_headers[0])
         for header in self._initial_headers[1:]:
@@ -53,6 +61,9 @@ class Miniminder(object):
         return True
 
     def init_requests(self):
+        """
+        Set Burp variables
+        """
         self._current_request = self._request.getRequest()
         self._initial_http_request = self._cb.makeHttpRequest(self._httpServ, self._current_request).getResponse()
         self._request_info = self._helpers.analyzeRequest(self._request)
@@ -62,11 +73,13 @@ class Miniminder(object):
         self._initial_invariants -= IGNORED_INVARIANTS 
         self._initial_parameters = list(self._request_info.getParameters())
         self._minimized_headers = list(self._initial_headers)[:]
-        self._minimized_body = list(self._initial_body)[:] 
-        
+        self._minimized_body = list(self._initial_body)[:]
         return True
 
     def display(self, request):
+        """
+        Change the display of the request in Burp
+        """
         self._request.setRequest(request)
         return True
     
@@ -172,19 +185,31 @@ class Miniminder(object):
         return True
 
     def _minimize(self, choice):
+        """
+        Main function.
+        """
         self.init_requests()
+        # Just headers
         if choice == 0:
                 self.minimize_headers()
                 self._request_to_send = self._helpers.buildHttpMessage(self._minimized_headers, self._minimized_body)
+        # Just Body
         elif choice == 1:
                 self.minimize_body()
-                arr = array.array('b', str(self._minimized_body))
-                self._request_to_send = self._helpers.buildHttpMessage(self._minimized_headers, arr)
+                if self._minimized_body:
+                    arr = array.array('b', str(self._minimized_body))
+                    self._request_to_send = self._helpers.buildHttpMessage(self._minimized_headers, arr)
+                else:
+                    self._request_to_send = self._helpers.buildHttpMessage(self._minimized_headers, "")
+        # Headers + Body
         elif choice == 2:
                 self.minimize_headers()
                 self.minimize_body()
-                arr = array.array('b', str(self._minimized_body))
-                self._request_to_send = self._helpers.buildHttpMessage(self._minimized_headers, arr)
+                if self._minimized_body:
+                    arr = array.array('b', str(self._minimized_body))
+                    self._request_to_send = self._helpers.buildHttpMessage(self._minimized_headers, arr)
+                else:
+                    self._request_to_send = self._helpers.buildHttpMessage(self._minimized_headers, "")
         else:
             print("Error :  Bad choice")
         self.display(self._request_to_send)
